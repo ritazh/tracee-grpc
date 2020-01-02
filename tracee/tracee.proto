@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package tracee;
+
+// Interface exported by the server.
+service Tracee {
+  // A client-to-server streaming RPC.
+  //
+  // Accepts a stream of traces of newly created containers or processes
+  rpc RecordTrace(stream Trace) returns (Result) {}
+}
+
+// Traces are mostly system calls performed by the processes 
+// and events, such as capabilities required to perform the actions requested by the process
+message Trace {
+  string event = 1;
+}
+
+// A Result is received in response to a RecordTrace rpc.
+message Result {
+  string message = 1;
+}
