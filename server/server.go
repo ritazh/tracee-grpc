@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -42,9 +43,20 @@ var (
 var (
 	// basic deny template
 	denyTemplateRego = `package Foo
-violation[{"msg": "DENIED when event is 0", "details": {}}] {
-	input.review.Event == 0
-}`
+	violation[{"msg": "DENIED when event is 0", "details": {}}] {
+		input.review.Event == 0
+	}`
+	// traceEvent deny template
+	traceEventTemplateRego = `package Foo
+	violation[{"msg": "DENIED when event triggering /bin/ls", "details": {}}] {
+		input.review.Object.arguments.p0 == "/bin/ls"
+	}
+	violation[{"msg": "DENIED when event triggering /bin/sh", "details": {}}] {
+		input.review.Object.arguments.p0 == "/bin/sh"
+	}`
+	// test trace event
+	traceEventLS = `{"status": [0], "uid": 0, "uts_name": "353f7a78ead1", "process_name": "sh", "pid": 8, "mnt_ns": 4026532549, "raw": "", "api": "execve", "return_value": 0, "arguments": {"p0": "/bin/ls", "p1": "[]"}, "time": 13658.341002, "tid": 8, "ppid": 1, "type": ["apicall"], "pid_ns": 4026532552}`
+	traceEventSH = `{"status": [0], "uid": 0, "uts_name": "353f7a78ead1", "process_name": "runc:[2:INIT]", "pid": 1, "mnt_ns": 4026532549, "raw": "", "api": "execve", "return_value": 0, "arguments": {"p0": "/bin/sh", "p1": "[]"}, "time": 13637.534257, "tid": 1, "ppid": 107132, "type": ["apicall"], "pid_ns": 4026532552}`
 )
 
 type traceeServer struct {
@@ -87,15 +99,25 @@ func (s *traceeServer) reviewEvent (event int) (*string, error) {
 	type targetData struct {
 		Name          string
 		Event         int
-		//vals          map[string]interface{}
+		Object        interface{}
 	}
-	resp, err := s.client.Review(s.ctx, targetData{Name: "testInput", Event: event}, opa.Tracing(true))
+	testTraceEvent := traceEventLS
+	if event == 0 {
+		testTraceEvent = traceEventSH
+	}
+	var eventObject interface{}
+	err := json.Unmarshal([]byte(testTraceEvent), &eventObject)
+	if err != nil {
+		return nil, err
+	}
+	log.Println(eventObject)
+	resp, err := s.client.Review(s.ctx, targetData{Name: "testInput", Object: eventObject}, opa.Tracing(true))
 	
 	if err != nil {
 		return nil, err
 	}
 	res := resp.Results()
-	log.Println(resp.TraceDump())
+	//log.Println(resp.TraceDump())
 	//log.Println(res)
 	// dump, err := s.client.Dump(s.ctx)
 	// if err != nil {
@@ -196,7 +218,8 @@ func main() {
 
 	// initialize templates and constraints
 
-	_, err = s.client.AddTemplate(s.ctx, newConstraintTemplate("Foo", denyTemplateRego))
+	//_, err = s.client.AddTemplate(s.ctx, newConstraintTemplate("Foo", denyTemplateRego))
+	_, err = s.client.AddTemplate(s.ctx, newConstraintTemplate("Foo", traceEventTemplateRego))
 	if err != nil {
 		log.Fatalf("Failed to add template %v", err)
 	}
