@@ -5,11 +5,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
+	"strings"
 	"strconv"
 
 	"google.golang.org/grpc"
@@ -17,7 +20,16 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/testdata"
 
+
+	opa "github.com/open-policy-agent/frameworks/constraint/pkg/client"
+	"github.com/open-policy-agent/frameworks/constraint/pkg/core/templates"
+	"github.com/open-policy-agent/frameworks/constraint/pkg/client/drivers/local"
+	"github.com/ritazh/tracee-grpc/target"
 	pb "github.com/ritazh/tracee-grpc/tracee"
+	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8schema "k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 var (
@@ -27,8 +39,18 @@ var (
 	port     = flag.Int("port", 10000, "The server port")
 )
 
+var (
+	// basic deny template
+	denyTemplateRego = `package Foo
+violation[{"msg": "DENIED when event is 0", "details": {}}] {
+	input.review.Event == 0
+}`
+)
+
 type traceeServer struct {
 	pb.UnimplementedTraceeServer
+	client *opa.Client
+	ctx context.Context
 }
 
 // RecordTrace accepts a stream of traces of newly created containers or processes
@@ -39,12 +61,16 @@ func (s *traceeServer) RecordTrace(stream pb.Tracee_RecordTraceServer) error {
 		traces, err := stream.Recv()
 		if traces != nil || err == io.EOF {
 			message := "ack"
-			s := traces.GetEvent()
-			if i, err := strconv.Atoi(s); err == nil {
-				if i > 0 {
-					message = s
+			event := traces.GetEvent()
+			if i, err := strconv.Atoi(event); err == nil {
+				msg, err := s.reviewEvent(i)
+				if err == nil && msg != nil {
+					message = *msg
+				} else {
+					log.Println("failed to review event: ", err)
+					return err
 				}
-			}
+			} 
 			return stream.SendAndClose(&pb.Result{
 				Message: message,
 			})
@@ -55,12 +81,84 @@ func (s *traceeServer) RecordTrace(stream pb.Tracee_RecordTraceServer) error {
 	}
 }
 
+func (s *traceeServer) reviewEvent (event int) (*string, error) {
+	var msgs []string
+	result := "allow"
+	type targetData struct {
+		Name          string
+		Event         int
+		//vals          map[string]interface{}
+	}
+	resp, err := s.client.Review(s.ctx, targetData{Name: "testInput", Event: event}, opa.Tracing(true))
+	
+	if err != nil {
+		return nil, err
+	}
+	res := resp.Results()
+	log.Println(resp.TraceDump())
+	//log.Println(res)
+	// dump, err := s.client.Dump(s.ctx)
+	// if err != nil {
+	// 	log.Println("dump error: ", err)
+	// } else {
+	// 	log.Println(dump)
+	// }
+	if len(res) > 0 {
+		for _, r := range res {
+			msgs = append(msgs, fmt.Sprintf("[denied by %s] %s", r.Constraint.GetName(), r.Msg))
+			//log.Println("r: ", r)
+		}
+		result = strings.Join(msgs, "\n")
+	}
+	return &result, nil
+}
+
+func newConstraintTemplate(name, rego string, libs ...string) *templates.ConstraintTemplate {
+	return &templates.ConstraintTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: strings.ToLower(name)},
+		Spec: templates.ConstraintTemplateSpec{
+			CRD: templates.CRD{
+				Spec: templates.CRDSpec{
+					Names: templates.Names{
+						Kind: name,
+					},
+					Validation: &templates.Validation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"expected": {Type: "string"},
+							},
+						},
+					},
+				},
+			},
+			Targets: []templates.Target{
+				{Target: "syscall.k8s.gatekeeper.sh", Rego: rego, Libs: libs},
+			},
+		},
+	}
+}
+
+func newConstraint(kind, name string, params map[string]string, enforcementAction *string) *unstructured.Unstructured {
+	c := &unstructured.Unstructured{}
+	c.SetGroupVersionKind(k8schema.GroupVersionKind{
+		Group:   "constraints.gatekeeper.sh",
+		Version: "v1beta1",
+		Kind:    kind,
+	})
+	c.SetName(name)
+	if err := unstructured.SetNestedStringMap(c.Object, params, "spec", "parameters"); err != nil {
+		log.Fatalf("failed to create constraint: %v", err)
+	}
+	return c
+}
+
 func newServer() *traceeServer {
 	s := &traceeServer{}
 	return s
 }
 
 func main() {
+	log.Println("staring server...")
 	flag.Parse()
 	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", *port))
 	if err != nil {
@@ -80,7 +178,35 @@ func main() {
 		}
 		opts = []grpc.ServerOption{grpc.Creds(creds)}
 	}
+	s := newServer()
+
+	// initialize OPA
+	driver := local.New(local.Tracing(false))
+	backend, err := opa.NewBackend(opa.Driver(driver))
+	if err != nil {
+		log.Println("unable to set up OPA backend ", err)
+		os.Exit(1)
+	}
+	s.client, err = backend.NewClient(opa.Targets(&target.SyscallValidationTarget{}))
+	if err != nil {
+		log.Println("unable to set up OPA client ", err)
+	}
+	s.ctx = context.Background()
+
+
+	// initialize templates and constraints
+
+	_, err = s.client.AddTemplate(s.ctx, newConstraintTemplate("Foo", denyTemplateRego))
+	if err != nil {
+		log.Fatalf("Failed to add template %v", err)
+	}
+	cstr := newConstraint("Foo", "bar", nil, nil)
+	if _, err := s.client.AddConstraint(s.ctx, cstr); err != nil {
+		log.Fatalf("Failed to add constraint %v", err)
+	}
+
+	// initialize grpc server
 	grpcServer := grpc.NewServer(opts...)
-	pb.RegisterTraceeServer(grpcServer, newServer())
+	pb.RegisterTraceeServer(grpcServer, s)
 	grpcServer.Serve(lis)
 }
