@@ -23,7 +23,7 @@ def record_trace(stub, event):
     print("returned result: %s" % tracee_result)
 
 def run():
-    with grpc.insecure_channel('localhost:10000') as channel:
+    with grpc.insecure_channel('grpc-service.default.svc.cluster.local:10000') as channel:
         stub = tracee_pb2_grpc.TraceeStub(channel)
         print("-------------- RecordTrace --------------")
         for i in range(0, 10):
