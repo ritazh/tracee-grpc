@@ -6,6 +6,8 @@ venv
 
 # Staging dirs
 .staging/
+# Output binaries
+output/
 
 # Binaries for programs and plugins
 *.exe
