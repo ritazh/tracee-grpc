@@ -3,9 +3,9 @@ module github.com/ritazh/tracee-grpc
 go 1.13
 
 require (
-	github.com/golang/protobuf v1.3.2
+	github.com/golang/protobuf v1.5.2
 	github.com/open-policy-agent/frameworks/constraint v0.0.0-20191112030435-1307ba72bce3
-	google.golang.org/grpc v1.26.0
+	google.golang.org/grpc v1.53.0
 	k8s.io/apiextensions-apiserver v0.0.0-20191016113550-5357c4baaf65
 	k8s.io/apimachinery v0.0.0-20191030190112-bb31b70367b7
 )
